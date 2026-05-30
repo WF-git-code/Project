@@ -1,6 +1,17 @@
+// 服务器实现文件
+//
+// 这个文件包含服务器端所有函数的实现
+// 主要包括：
+// 1. 配置读取
+// 2. 数据库操作（MySQL）
+// 3. Redis缓存和分布式锁
+// 4. Socket事件处理
+// 5. TCP服务器主循环
+
 #include "server.h"
 
 // 从配置文件读取服务器配置
+// 这个函数会逐行读取配置文件，解析key-value对
 bool ServerConfig::ReadConf(string filename)
 {
     FILE *fp = fopen(filename.c_str(), "r");
@@ -12,8 +23,10 @@ bool ServerConfig::ReadConf(string filename)
 
     char buff[128] = {0};
     int line_num = 1;
+    
     while (fgets(buff, 127, fp) != NULL)
     {
+        // 跳过注释行和空行
         if (buff[0] == '#' || buff[0] == '\n')
         {
             line_num++;
@@ -25,6 +38,7 @@ bool ServerConfig::ReadConf(string filename)
             buff[strlen(buff) - 1] = '\0';
         }
 
+        // 使用strtok分割字符串（空格分隔）
         char *key = strtok(buff, " ");
         char *value = strtok(NULL, " ");
 
@@ -34,6 +48,7 @@ bool ServerConfig::ReadConf(string filename)
             continue;
         }
 
+        // 解析各种配置项
         if (strcmp(key, "ip") == 0 && value) listen_ip = value;
         else if (strcmp(key, "port") == 0 && value) listen_port = atoi(value);
         else if (strcmp(key, "lismax") == 0 && value) listen_max = atoi(value);
@@ -64,6 +79,7 @@ bool ServerConfig::ReadConf(string filename)
     return true;
 }
 
+// 打印配置信息（用于调试）
 void ServerConfig::PrintInfo()
 {
     LOG_INFO << "========== Server Config ==========";
@@ -90,6 +106,7 @@ void ServerConfig::PrintInfo()
     LOG_INFO << "===================================";
 }
 
+// 重置监听Socket的epoll事件
 void ListenSocket::ResetEvent()
 {
     struct epoll_event ev;
@@ -98,6 +115,7 @@ void ListenSocket::ResetEvent()
     epoll_ctl(m_epfd, EPOLL_CTL_MOD, m_fd, &ev);
 }
 
+// 重置连接Socket的epoll事件
 void ConnectSocket::ResetEvent()
 {
     struct epoll_event ev;
@@ -189,7 +207,7 @@ bool MysqlClient::Db_User_Login(const string &tel, string &name, const string &p
     return true;
 }
 
-// Redis 缓存辅助函数
+// 从Redis缓存获取票务列表
 bool Cache_Get_Ticket_List(Json::Value &res)
 {
     redis_pool::RedisConnectionGuard guard;
@@ -214,6 +232,7 @@ bool Cache_Get_Ticket_List(Json::Value &res)
     return false;
 }
 
+// 设置Redis缓存
 bool Cache_Set_Ticket_List(const Json::Value &data, int ttl)
 {
     redis_pool::RedisConnectionGuard guard;
@@ -230,6 +249,7 @@ bool Cache_Set_Ticket_List(const Json::Value &data, int ttl)
     return success;
 }
 
+// 删除Redis缓存
 bool Cache_Delete_Ticket_List()
 {
     redis_pool::RedisConnectionGuard guard;
@@ -243,7 +263,7 @@ bool Cache_Delete_Ticket_List()
     return success;
 }
 
-// Redis 分布式锁
+// 获取Redis分布式锁
 bool Redis_Lock(const std::string &key, int timeout_ms)
 {
     redis_pool::RedisConnectionGuard guard;
@@ -257,6 +277,7 @@ bool Redis_Lock(const std::string &key, int timeout_ms)
     return success;
 }
 
+// 释放Redis分布式锁
 bool Redis_Unlock(const std::string &key)
 {
     redis_pool::RedisConnectionGuard guard;
@@ -270,19 +291,19 @@ bool Redis_Unlock(const std::string &key)
     return success;
 }
 
-// 全局配置指针（用于访问 TTL）
+// 全局配置指针
 static ServerConfig* g_config = nullptr;
 
-// 查询所有可预约票务
+// 查询所有可预约票务（带缓存）
 bool MysqlClient::Db_Show_Ticket(Json::Value &res)
 {
-    // 先尝试从 Redis 缓存获取
+    // 先尝试从Redis缓存获取
     if (Cache_Get_Ticket_List(res)) {
         LOG_INFO << "[Redis] 命中缓存: ticket:list";
         return true;
     }
 
-    // 缓存未命中，从 MySQL 查询
+    // 缓存未命中，从MySQL查询
     LOG_INFO << "[Redis] 缓存未命中，从数据库查询";
     mysql_pool::ConnectionGuard guard;
     if (!guard.valid())
@@ -328,7 +349,7 @@ bool MysqlClient::Db_Show_Ticket(Json::Value &res)
     }
     mysql_free_result(result);
 
-    // 将结果缓存到 Redis
+    // 缓存查询结果
     if (g_config) {
         Cache_Set_Ticket_List(res, g_config->redis_ttl);
         LOG_INFO << "[Redis] 缓存已更新: ticket:list, TTL=" << g_config->redis_ttl;
@@ -337,12 +358,12 @@ bool MysqlClient::Db_Show_Ticket(Json::Value &res)
     return true;
 }
 
-// 预约票务（事务保证原子性 + Redis 分布式锁）
+// 预约票务（事务 + 分布式锁）
 bool MysqlClient::Db_Yd_Ticket(string& usertel, string& ticketid)
 {
-    // 尝试获取分布式锁
+    // 获取分布式锁
     std::string lock_key = "lock:ticket:" + ticketid;
-    bool has_lock = Redis_Lock(lock_key, 5000); // 5秒超时
+    bool has_lock = Redis_Lock(lock_key, 5000);
     if (!has_lock) {
         LOG_WARN << "[Redis] 获取锁失败: " << lock_key;
         return false;
@@ -365,7 +386,7 @@ bool MysqlClient::Db_Yd_Ticket(string& usertel, string& ticketid)
     char escaped_tel[512] = {0};
     mysql_real_escape_string(conn, escaped_tel, usertel.c_str(), usertel.length());
 
-    // 先更新票数，只有没卖完才能预约成功
+    // 更新票务库存（乐观锁）
     char sql_update[512] = {0};
     snprintf(sql_update, sizeof(sql_update), 
         "update ticket_table set tk_count = tk_count + 1 where tk_id = %s and tk_count < tk_max and status=1", 
@@ -385,6 +406,7 @@ bool MysqlClient::Db_Yd_Ticket(string& usertel, string& ticketid)
         return false;
     }
 
+    // 插入预约记录
     char sql_insert[2048] = {0};
     snprintf(sql_insert, sizeof(sql_insert), 
         "insert into yd_table(yd_id, tel, tk_id, ctime, status) values(0,'%s',%s,now(),1)", 
@@ -400,7 +422,7 @@ bool MysqlClient::Db_Yd_Ticket(string& usertel, string& ticketid)
     mysql_query(conn, "COMMIT");
     result = true;
 
-    // 预约成功，清除缓存
+    // 清除缓存
     Cache_Delete_Ticket_List();
     LOG_INFO << "[Redis] 缓存已清除: ticket:list";
 
@@ -467,12 +489,11 @@ bool MysqlClient::Db_Get_Yuyue(string& usertel, Json::Value& res)
     return true;
 }
 
-// 取消预约（事务）
+// 取消预约（事务 + 分布式锁）
 bool MysqlClient::Db_Cancel_Yuyue(string& usertel, string& ticketid)
 {
-    // 尝试获取分布式锁
     std::string lock_key = "lock:ticket:" + ticketid;
-    bool has_lock = Redis_Lock(lock_key, 5000); // 5秒超时
+    bool has_lock = Redis_Lock(lock_key, 5000);
     if (!has_lock) {
         LOG_WARN << "[Redis] 获取锁失败: " << lock_key;
         return false;
@@ -495,6 +516,7 @@ bool MysqlClient::Db_Cancel_Yuyue(string& usertel, string& ticketid)
     char escaped_tel[512] = {0};
     mysql_real_escape_string(conn, escaped_tel, usertel.c_str(), usertel.length());
 
+    // 更新预约状态为已取消
     char sql_update_yd[2048] = {0};
     snprintf(sql_update_yd, sizeof(sql_update_yd), 
         "update yd_table set status=0 where tel = '%s' and tk_id = %s and status=1", 
@@ -514,6 +536,7 @@ bool MysqlClient::Db_Cancel_Yuyue(string& usertel, string& ticketid)
         return false;
     }
 
+    // 恢复票务库存
     char sql_update_ticket[512] = {0};
     snprintf(sql_update_ticket, sizeof(sql_update_ticket), 
         "update ticket_table set tk_count = tk_count - 1 where tk_id = %s", 
@@ -529,17 +552,16 @@ bool MysqlClient::Db_Cancel_Yuyue(string& usertel, string& ticketid)
     mysql_query(conn, "COMMIT");
     result = true;
 
-    // 取消成功，清除缓存
     Cache_Delete_Ticket_List();
     LOG_INFO << "[Redis] 缓存已清除: ticket:list";
 
-    // 释放锁
     Redis_Unlock(lock_key);
     LOG_INFO << "[Redis] 锁已释放: " << lock_key;
 
     return result;
 }
 
+// 静态成员初始化
 int ListenSocket::connection_count = 0;
 
 // 处理新连接
@@ -575,6 +597,7 @@ void ListenSocket::Handle_Data()
     }
 }
 
+// 发送成功响应
 void ConnectSocket::Send_OK()
 {
     Json::Value tmp;
@@ -583,6 +606,7 @@ void ConnectSocket::Send_OK()
     send(m_fd, resp.c_str(), resp.length(), 0);
 }
 
+// 发送失败响应
 void ConnectSocket::Send_ERR()
 {
     Json::Value tmp;
@@ -591,6 +615,7 @@ void ConnectSocket::Send_ERR()
     send(m_fd, resp.c_str(), resp.length(), 0);
 }
 
+// 发送JSON对象响应
 void ConnectSocket::Send_Jsonobj(Json::Value &root)
 {
     string resp = root.toStyledString();
@@ -610,6 +635,7 @@ void ConnectSocket::Get_OpType(char buff[])
     m_op_type = m_request["type"].asInt();
 }
 
+// 处理用户注册请求
 void ConnectSocket::User_Register()
 {
     LOG_INFO << "[SERVER] 处理注册请求";
@@ -628,6 +654,7 @@ void ConnectSocket::User_Register()
     Send_OK();
 }
 
+// 处理用户登录请求
 void ConnectSocket::User_Login()
 {
     LOG_INFO << "[SERVER] 处理登录请求";
@@ -652,6 +679,7 @@ void ConnectSocket::User_Login()
     Send_Jsonobj(res);
 }
 
+// 处理查看票务请求
 void ConnectSocket::Show_Ticket()
 {
     LOG_INFO << "[SERVER] 处理查看票务请求";
@@ -667,6 +695,7 @@ void ConnectSocket::Show_Ticket()
     Send_Jsonobj(res);
 }
 
+// 处理预约票务请求
 void ConnectSocket::Yd_Ticket()
 {
     LOG_INFO << "[SERVER] 处理预约请求";
@@ -684,6 +713,7 @@ void ConnectSocket::Yd_Ticket()
     Send_OK();
 }
 
+// 处理查看我的预约请求
 void ConnectSocket::Show_My_Yuyue()
 {
     LOG_INFO << "[SERVER] 处理查看我的预约请求";
@@ -701,6 +731,7 @@ void ConnectSocket::Show_My_Yuyue()
     Send_Jsonobj(res);
 }
 
+// 处理取消预约请求
 void ConnectSocket::Cancel_Yuyue()
 {
     LOG_INFO << "[SERVER] 处理取消预约请求";
@@ -807,7 +838,7 @@ void TcpServer::Run()
     }
 }
 
-// 处理就绪事件，提交到线程池
+// 处理就绪事件
 void TcpServer::do_events()
 {
     for (int i = 0; i < m_event_count; i++)
@@ -822,7 +853,7 @@ void TcpServer::do_events()
     }
 }
 
-// 创建监听socket
+// 创建监听Socket
 bool TcpServer::create_socket()
 {
     m_listen_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -850,6 +881,7 @@ bool TcpServer::create_socket()
     return true;
 }
 
+// main函数：程序入口
 int main(int argc, char *argv[])
 {
     string conf_path = "../my.conf";
@@ -865,7 +897,6 @@ int main(int argc, char *argv[])
         exit(1);
     }
 
-    // 设置全局配置指针
     g_config = &conf;
 
     logfile::LoggerManager::getInstance().init(
