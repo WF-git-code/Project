@@ -46,6 +46,7 @@ CMakeFiles/server.dir/server/server.cpp.o: ../server/LogFile/include/Logger.hpp
 CMakeFiles/server.dir/server/server.cpp.o: ../server/LogFile/include/LoggerManager.hpp
 CMakeFiles/server.dir/server/server.cpp.o: ../server/LogFile/include/Timestamp.hpp
 CMakeFiles/server.dir/server/server.cpp.o: ../server/MysqlConnectionPool.hpp
+CMakeFiles/server.dir/server/server.cpp.o: ../server/Protocol.hpp
 CMakeFiles/server.dir/server/server.cpp.o: ../server/RedisConnectionPool.hpp
 CMakeFiles/server.dir/server/server.cpp.o: ../server/ThreadPool/CachedThreadPool.hpp
 CMakeFiles/server.dir/server/server.cpp.o: ../server/ThreadPool/TaskQueue.hpp

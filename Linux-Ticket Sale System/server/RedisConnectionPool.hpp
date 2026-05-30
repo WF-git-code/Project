@@ -1,4 +1,4 @@
-// Redis连接池头文件
+// Redis连接池头文件（LRU优化版）
 //
 // 这个文件实现了Redis连接池，用于管理Redis连接
 // 主要功能：
@@ -6,26 +6,32 @@
 // 2. 线程安全的连接获取和归还
 // 3. RAII自动归还连接
 // 4. 单例模式（整个程序只有一个连接池）
+// 5. LRU算法优化连接管理（最近最少使用）
+// 6. 连接有效性检查和自动清理
 
 #ifndef REDIS_CONNECTION_POOL_HPP
 #define REDIS_CONNECTION_POOL_HPP
 
 #include <iostream>
 #include <string>
-#include <queue>
+#include <list>
 #include <memory>
 #include <mutex>
 #include <condition_variable>
+#include <chrono>
 #include <hiredis/hiredis.h>
 
 namespace redis_pool {
 
 // Redis连接封装类
-// 这个类封装了一个Redis连接，记录连接是否被使用
+// 这个类封装了一个Redis连接，记录连接是否被使用和最后使用时间
 class RedisConnection {
 public:
     // 构造函数：传入Redis上下文
-    RedisConnection(redisContext* ctx) : ctx_(ctx), in_use_(false) {}
+    RedisConnection(redisContext* ctx) : ctx_(ctx), in_use_(false) {
+        // 初始化最后使用时间为当前时间
+        last_used_ = std::chrono::steady_clock::now();
+    }
     
     // 析构函数：释放Redis连接
     ~RedisConnection() {
@@ -38,21 +44,39 @@ public:
     redisContext* get() { return ctx_; }
     
     // 检查连接是否有效
-    bool valid() { return ctx_ && ctx_->err == 0; }
+    bool valid() { 
+        if (!ctx_) return false;
+        // 简单检查：检查err标志
+        if (ctx_->err != 0) return false;
+        // 也可以尝试ping命令进行更可靠的检查
+        return true;
+    }
     
     // 设置连接是否正在使用
     void set_in_use(bool use) { in_use_ = use; }
     
     // 获取连接是否正在使用
     bool in_use() const { return in_use_; }
+    
+    // 更新最后使用时间（LRU算法需要）
+    void update_last_used() {
+        last_used_ = std::chrono::steady_clock::now();
+    }
+    
+    // 获取最后使用时间
+    std::chrono::steady_clock::time_point last_used() const {
+        return last_used_;
+    }
 
 private:
     redisContext* ctx_;  // hiredis的Redis上下文
     bool in_use_;        // 标记连接是否正在被使用
+    std::chrono::steady_clock::time_point last_used_;  // 最后使用时间（LRU）
 };
 
 // Redis连接池类
 // 这是一个单例类，整个程序只有一个连接池
+// 使用LRU算法管理连接
 class RedisConnectionPool {
 public:
     // 获取连接池单例
@@ -78,28 +102,47 @@ public:
         for (int i = 0; i < pool_size; ++i) {
             auto conn = createConnection();  // 创建一个新连接
             if (conn && conn->valid()) {
-                connections_.push(std::move(conn));  // 将连接放入队列
+                connections_.push_back(std::move(conn));  // 将连接放入链表
             }
         }
     }
 
     // 从连接池获取一个连接
     // 如果没有可用连接，会阻塞等待
+    // 使用LRU策略：优先返回最近使用过的连接
     std::shared_ptr<RedisConnection> getConnection() {
         std::unique_lock<std::mutex> lock(mutex_);
         
         // 等待条件：有可用连接 或者 连接池已停止
         cond_.wait(lock, [this] {
-            return !connections_.empty() || !running_;
+            // 检查是否有可用连接
+            for (auto& conn : connections_) {
+                if (!conn->in_use()) return true;
+            }
+            return !running_;  // 或者连接池停止了
         });
 
         if (!running_) return nullptr;  // 如果连接池已停止，返回空
 
-        // 从队列头部取出一个连接
-        auto conn = std::move(connections_.front());
-        connections_.pop();
-        conn->set_in_use(true);  // 标记连接正在使用
-        return conn;
+        // 先清理掉无效连接
+        cleanupInvalidConnections();
+        
+        // LRU策略：优先返回最近使用过的连接
+        // 遍历找到第一个空闲连接，找到后将其移到链表头部（标记为最近使用）
+        for (auto it = connections_.begin(); it != connections_.end(); ++it) {
+            if (!(*it)->in_use() && (*it)->valid()) {
+                auto conn = *it;
+                // 找到后，将其从原位置移除并移动到头部
+                connections_.erase(it);
+                connections_.push_front(conn);
+                conn->set_in_use(true);  // 标记连接正在使用
+                conn->update_last_used();  // 更新最后使用时间
+                return conn;
+            }
+        }
+        
+        // 如果没有找到可用连接（虽然wait过了，但避免竞态）
+        return nullptr;
     }
 
     // 归还一个连接到连接池
@@ -107,9 +150,27 @@ public:
         if (!conn) return;  // 空指针直接返回
 
         std::lock_guard<std::mutex> lock(mutex_);
+        
+        // 检查连接是否有效
+        if (!conn->valid()) {
+            // 连接无效，不归还，直接丢弃（会被智能指针自动释放）
+            std::cerr << "Redis连接已失效，不归还到连接池" << std::endl;
+            // 尝试创建新连接补充
+            auto new_conn = createConnection();
+            if (new_conn && new_conn->valid()) {
+                connections_.push_back(std::move(new_conn));
+            }
+            cond_.notify_one();  // 通知一个等待的线程
+            return;
+        }
+        
         conn->set_in_use(false);  // 标记连接未使用
-        connections_.push(conn);  // 将连接放回队列
-        cond_.notify_one();       // 通知一个等待的线程
+        conn->update_last_used();  // 更新最后使用时间
+        
+        // LRU策略：将归还的连接放到链表头部（最近使用）
+        connections_.push_front(conn);
+        
+        cond_.notify_one();  // 通知一个等待的线程
     }
 
     // 停止连接池
@@ -160,8 +221,23 @@ private:
         // 返回封装好的连接对象
         return std::make_unique<RedisConnection>(ctx);
     }
+    
+    // 清理无效连接（LRU辅助函数）
+    void cleanupInvalidConnections() {
+        auto it = connections_.begin();
+        while (it != connections_.end()) {
+            if (!(*it)->valid() && !(*it)->in_use()) {
+                // 找到无效且空闲的连接，删除
+                std::cerr << "清理Redis无效连接" << std::endl;
+                it = connections_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
 
-    std::queue<std::shared_ptr<RedisConnection>> connections_;  // 连接队列
+    // 使用list替代queue，便于LRU管理
+    std::list<std::shared_ptr<RedisConnection>> connections_;
     std::mutex mutex_;                                          // 互斥锁
     std::condition_variable cond_;                              // 条件变量
     std::string host_;                                          // Redis主机地址

@@ -598,28 +598,37 @@ void ListenSocket::Handle_Data()
 }
 
 // 发送成功响应
+// 使用自定义协议封装响应数据
 void ConnectSocket::Send_OK()
 {
     Json::Value tmp;
     tmp["status"] = "OK";
     string resp = tmp.toStyledString();
-    send(m_fd, resp.c_str(), resp.length(), 0);
+    // 用协议封装响应数据
+    string packet = ProtocolHandler::pack(CMD_EXIT, resp);
+    send(m_fd, packet.c_str(), packet.length(), 0);
 }
 
 // 发送失败响应
+// 使用自定义协议封装响应数据
 void ConnectSocket::Send_ERR()
 {
     Json::Value tmp;
     tmp["status"] = "ERR";
     string resp = tmp.toStyledString();
-    send(m_fd, resp.c_str(), resp.length(), 0);
+    // 用协议封装响应数据
+    string packet = ProtocolHandler::pack(CMD_EXIT, resp);
+    send(m_fd, packet.c_str(), packet.length(), 0);
 }
 
 // 发送JSON对象响应
+// 使用自定义协议封装响应数据
 void ConnectSocket::Send_Jsonobj(Json::Value &root)
 {
     string resp = root.toStyledString();
-    send(m_fd, resp.c_str(), resp.length(), 0);
+    // 用协议封装响应数据，使用CMD_EXIT作为通用响应命令
+    string packet = ProtocolHandler::pack(CMD_EXIT, resp);
+    send(m_fd, packet.c_str(), packet.length(), 0);
 }
 
 // 解析请求中的操作类型
@@ -750,6 +759,7 @@ void ConnectSocket::Cancel_Yuyue()
 }
 
 // 处理客户端数据
+// 使用自定义TCP协议处理粘包拆包问题
 void ConnectSocket::Handle_Data()
 {
     char buff[1024] = {0};
@@ -761,18 +771,46 @@ void ConnectSocket::Handle_Data()
         return;
     }
 
-    Get_OpType(buff);
-
-    switch (m_op_type)
-    {
-    case LOGIN: User_Login(); break;
-    case REGISTER: User_Register(); break;
-    case SHOW_TICKET: Show_Ticket(); break;
-    case BOOK_TICKET: Yd_Ticket(); break;
-    case MY_BOOKINGS: Show_My_Yuyue(); break;
-    case CANCEL_BOOKING: Cancel_Yuyue(); break;
-    case EXIT: LOG_INFO << "客户端请求退出"; break;
-    default: LOG_WARN << "未知操作类型: " << m_op_type; break;
+    // 使用自定义协议解析数据
+    std::string data;
+    uint8_t cmd;
+    // 循环解析，可能收到多个数据包
+    while (m_protocol.receive_and_parse(buff, n, data, cmd)) {
+        // 转换命令类型（新协议枚举 -> 原枚举）
+        switch(cmd) {
+            case CMD_LOGIN: m_op_type = LOGIN; break;
+            case CMD_REGISTER: m_op_type = REGISTER; break;
+            case CMD_SHOW_TICKET: m_op_type = SHOW_TICKET; break;
+            case CMD_ORDER: m_op_type = BOOK_TICKET; break;
+            case CMD_SHOW_ORDER: m_op_type = MY_BOOKINGS; break;
+            case CMD_CANCEL: m_op_type = CANCEL_BOOKING; break;
+            case CMD_EXIT: m_op_type = EXIT; break;
+            default: m_op_type = -1; break;
+        }
+        
+        // 解析JSON数据
+        Json::Reader reader;
+        if (!reader.parse(data, m_request)) {
+            LOG_WARN << "JSON解析失败 - data=" << data;
+            Send_ERR();
+            ResetEvent();
+            return;
+        }
+        
+        LOG_DEBUG << "收到协议数据包 - cmd=" << (int)cmd << ", data=" << data;
+        
+        // 处理业务逻辑
+        switch (m_op_type)
+        {
+        case LOGIN: User_Login(); break;
+        case REGISTER: User_Register(); break;
+        case SHOW_TICKET: Show_Ticket(); break;
+        case BOOK_TICKET: Yd_Ticket(); break;
+        case MY_BOOKINGS: Show_My_Yuyue(); break;
+        case CANCEL_BOOKING: Cancel_Yuyue(); break;
+        case EXIT: LOG_INFO << "客户端请求退出"; break;
+        default: LOG_WARN << "未知操作类型: " << m_op_type; break;
+        }
     }
 
     ResetEvent();

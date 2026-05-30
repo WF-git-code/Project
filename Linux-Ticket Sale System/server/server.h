@@ -40,6 +40,7 @@
 #include "LogFile/include/LoggerManager.hpp"
 #include "MysqlConnectionPool.hpp"
 #include "RedisConnectionPool.hpp"
+#include "Protocol.hpp"
 
 using namespace std;
 
@@ -228,6 +229,7 @@ public:
 private:
     int m_op_type;            // 解析出的操作类型
     Json::Value m_request;    // 解析出的JSON请求数据
+    ProtocolHandler m_protocol; // 自定义TCP协议处理器，解决粘包拆包
 
     // 重新注册epoll事件（EPOLLONESHOT）
     void ResetEvent();

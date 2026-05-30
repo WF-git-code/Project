@@ -47,6 +47,7 @@ CMakeFiles/server.dir/server/server.cpp.o
  /home/wf/linux_new_project/server/LogFile/include/LoggerManager.hpp
  /home/wf/linux_new_project/server/LogFile/include/Timestamp.hpp
  /home/wf/linux_new_project/server/MysqlConnectionPool.hpp
+ /home/wf/linux_new_project/server/Protocol.hpp
  /home/wf/linux_new_project/server/RedisConnectionPool.hpp
  /home/wf/linux_new_project/server/ThreadPool/CachedThreadPool.hpp
  /home/wf/linux_new_project/server/ThreadPool/TaskQueue.hpp

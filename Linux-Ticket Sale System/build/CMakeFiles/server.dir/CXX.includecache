@@ -119,13 +119,25 @@ mysql/mysql.h
 -
 string
 -
-queue
+list
 -
 mutex
 -
 condition_variable
 -
 memory
+-
+chrono
+-
+
+/home/wf/linux_new_project/server/Protocol.hpp
+string
+-
+vector
+-
+cstdint
+-
+cstring
 -
 
 /home/wf/linux_new_project/server/RedisConnectionPool.hpp
@@ -133,13 +145,15 @@ iostream
 -
 string
 -
-queue
+list
 -
 memory
 -
 mutex
 -
 condition_variable
+-
+chrono
 -
 hiredis/hiredis.h
 -
@@ -227,4 +241,6 @@ MysqlConnectionPool.hpp
 /home/wf/linux_new_project/server/MysqlConnectionPool.hpp
 RedisConnectionPool.hpp
 /home/wf/linux_new_project/server/RedisConnectionPool.hpp
+Protocol.hpp
+/home/wf/linux_new_project/server/Protocol.hpp
 
