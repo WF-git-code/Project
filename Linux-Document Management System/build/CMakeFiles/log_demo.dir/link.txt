@@ -1,0 +1,1 @@
+/usr/bin/c++  -Wall -Wextra -Wpedantic   CMakeFiles/log_demo.dir/demo/LogCleanerDemo.cpp.o  -o ../bin/log_demo  -ljsoncpp -lmysqlclient -lhiredis -lpthread 

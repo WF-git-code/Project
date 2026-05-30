@@ -1,0 +1,1 @@
+/usr/bin/c++  -Wall -Wextra -Wpedantic   CMakeFiles/client.dir/client/client.cpp.o  -o ../bin/client  -ljsoncpp -lmysqlclient -lhiredis -lpthread 

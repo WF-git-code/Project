@@ -1,0 +1,5 @@
+/home/wf/linux_new_project/build/CMakeFiles/rebuild_cache.dir
+/home/wf/linux_new_project/build/CMakeFiles/edit_cache.dir
+/home/wf/linux_new_project/build/CMakeFiles/log_demo.dir
+/home/wf/linux_new_project/build/CMakeFiles/client.dir
+/home/wf/linux_new_project/build/CMakeFiles/server.dir
