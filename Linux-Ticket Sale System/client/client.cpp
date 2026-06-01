@@ -4,36 +4,93 @@
 // 主要流程：
 // 1. 连接服务器
 // 2. 显示菜单
-// 3. 根据用户选择发送请求
+// 3. 根据用户选择发送请求（使用自定义协议）
 // 4. 接收并显示服务器响应
+// 5. 文件上传功能（支持大文件和断点续传）
 
 #include "client.h"
+
+// 辅助函数：获取文件大小
+static size_t get_file_size(const string &filename)
+{
+    struct stat st;
+    if (stat(filename.c_str(), &st) == 0) {
+        return st.st_size;
+    }
+    return 0;
+}
+
+// 辅助函数：从文件名提取基础名称
+static string get_file_basename(const string &filepath)
+{
+    size_t pos = filepath.find_last_of("/");
+    if (pos != string::npos) {
+        return filepath.substr(pos + 1);
+    }
+    return filepath;
+}
+
+// 辅助函数：接收服务器响应（解析协议）
+bool TcpClient::Receive_Response(Json::Value &response)
+{
+    char buff[4096] = {0};
+    int n = recv(sockfd, buff, 4095, 0);
+    if (n <= 0) {
+        cout << "服务器断开" << endl;
+        return false;
+    }
+
+    // 使用协议解析
+    std::string data;
+    uint8_t cmd;
+    if (m_protocol.receive_and_parse(buff, n, data, cmd)) {
+        Json::Reader reader;
+        if (!reader.parse(data, response)) {
+            cout << "JSON解析失败" << endl;
+            return false;
+        }
+        return true;
+    }
+    cout << "协议解析失败" << endl;
+    return false;
+}
+
+// 辅助函数：发送请求并接收响应
+bool TcpClient::Send_Request(uint8_t cmd, const Json::Value &request, Json::Value &response)
+{
+    // 使用协议打包
+    string packet = ProtocolHandler::pack(cmd, request.toStyledString());
+    
+    // 发送
+    if (send(sockfd, packet.c_str(), packet.size(), 0) <= 0) {
+        cout << "发送失败" << endl;
+        return false;
+    }
+    
+    // 接收响应
+    return Receive_Response(response);
+}
 
 // 初始化Socket连接
 // 步骤：socket() -> connect()
 bool TcpClient::Socket_Init()
 {
     // 步骤1：创建Socket
-    // 参数1：AF_INET表示IPv4
-    // 参数2：SOCK_STREAM表示TCP协议
-    // 参数3：0表示默认协议
     sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd == -1)
-    {
+    if (sockfd == -1) {
         cout << "socket创建失败" << endl;
         return false;
     }
 
     // 步骤2：设置服务器地址结构
     struct sockaddr_in saddr;
-    memset(&saddr, 0, sizeof(saddr));  // 先清零
-    saddr.sin_family = AF_INET;        // IPv4
-    saddr.sin_port = htons(port);      // 端口号（转网络字节序）
-    saddr.sin_addr.s_addr = inet_addr(ips.c_str());  // IP地址
+    memset(&saddr, 0, sizeof(saddr));
+    saddr.sin_family = AF_INET;
+    saddr.sin_port = htons(port);
+    saddr.sin_addr.s_addr = inet_addr(ips.c_str());
 
     // 步骤3：连接服务器
-    if (connect(sockfd, (struct sockaddr *)&saddr, sizeof(saddr)) == -1)
-    {
+    if (connect(sockfd, (struct sockaddr *)&saddr, sizeof(saddr)) == -1) {
         cout << "连接服务器失败" << endl;
         return false;
     }
@@ -43,23 +100,21 @@ bool TcpClient::Socket_Init()
 }
 
 // 客户端主循环
-// 不断显示菜单 -> 处理用户选择 -> 循环
 void TcpClient::run()
 {
-    while (runing)
-    {
-        Print_info();  // 显示菜单，获取用户选择
-        switch (op_type)
-        {
+    while (runing) {
+        Print_info();
+        switch (op_type) {
         case LOGIN: User_Login(); break;
         case REGISTER: User_Register(); break;
         case SHOW_TICKET: Show_Ticket(); break;
         case BOOK_TICKET: YD_Ticket(); break;
         case MY_BOOKINGS: Show_My_Yuyue(); break;
         case CANCEL_BOOKING: Cancel_Yuyue(); break;
+        case UPLOAD_FILE: Upload_File(); break;
         case EXIT:
-            runing = false;  // 标记停止运行
-            if (sockfd >= 0) close(sockfd);  // 关闭Socket
+            runing = false;
+            if (sockfd >= 0) close(sockfd);
             cout << "再见！" << endl;
             break;
         default:
@@ -70,7 +125,6 @@ void TcpClient::run()
 }
 
 // 用户注册
-// 步骤：输入信息 -> 发送请求 -> 接收响应
 void TcpClient::User_Register()
 {
     cout << endl;
@@ -78,7 +132,6 @@ void TcpClient::User_Register()
     cout << "|            用户注册" << endl;
     cout << "+----------------------------------------+" << endl;
     
-    // 输入用户信息
     cout << "|  手机号: ";
     cin >> usertel;
     cout << "|  用户名: ";
@@ -87,37 +140,18 @@ void TcpClient::User_Register()
     cout << "|  密码: ";
     cin >> passwd;
     
-    // 构造JSON请求
-    Json::Value val;
-    val["type"] = REGISTER;            // 操作类型：注册
-    val["user_tel"] = usertel;         // 手机号
-    val["user_name"] = username;       // 用户名
-    val["user_passwd"] = passwd;       // 密码
+    Json::Value request;
+    request["type"] = REGISTER;
+    request["user_tel"] = usertel;
+    request["user_name"] = username;
+    request["user_passwd"] = passwd;
     
-    // 发送请求给服务器
-    send(sockfd, val.toStyledString().c_str(), strlen(val.toStyledString().c_str()), 0);
-    
-    // 接收服务器响应
-    char buff[256] = {0};
-    int n = recv(sockfd, buff, 255, 0);
-    if (n <= 0)
-    {
-        cout << "服务器断开" << endl;
+    Json::Value response;
+    if (!Send_Request(CMD_REGISTER, request, response)) {
         return;
     }
     
-    // 解析JSON响应
-    Json::Value rval;
-    Json::Reader Read;
-    if (!Read.parse(buff, rval))
-    {
-        cout << "JSON解析失败" << endl;
-        return;
-    }
-    
-    // 判断是否成功
-    if (rval["status"].asString() != "OK")
-    {
+    if (response["status"].asString() != "OK") {
         cout << endl;
         cout << "+----------------------------------------+" << endl;
         cout << "|            注册失败" << endl;
@@ -129,11 +163,10 @@ void TcpClient::User_Register()
     cout << "+----------------------------------------+" << endl;
     cout << "|            注册成功" << endl;
     cout << "+----------------------------------------+" << endl;
-    login_status = true;  // 注册成功，自动登录
+    login_status = true;
 }
 
 // 用户登录
-// 步骤：输入手机号和密码 -> 发送请求 -> 接收响应
 void TcpClient::User_Login()
 {
     cout << endl;
@@ -141,43 +174,23 @@ void TcpClient::User_Login()
     cout << "|            用户登录" << endl;
     cout << "+----------------------------------------+" << endl;
     
-    // 输入登录信息
     cout << "|  手机号: ";
     cin >> usertel;
-    cout << "|  密码: ";
     string passwd;
+    cout << "|  密码: ";
     cin >> passwd;
 
-    // 构造JSON请求
-    Json::Value val;
-    val["type"] = LOGIN;
-    val["user_tel"] = usertel;
-    val["user_passwd"] = passwd;
+    Json::Value request;
+    request["type"] = LOGIN;
+    request["user_tel"] = usertel;
+    request["user_passwd"] = passwd;
     
-    // 发送请求
-    send(sockfd, val.toStyledString().c_str(), strlen(val.toStyledString().c_str()), 0);
-
-    // 接收响应
-    char buff[256] = {0};
-    int n = recv(sockfd, buff, 255, 0);
-    if (n <= 0)
-    {
-        cout << "服务器断开" << endl;
+    Json::Value response;
+    if (!Send_Request(CMD_LOGIN, request, response)) {
         return;
     }
 
-    // 解析JSON
-    Json::Value root;
-    Json::Reader Read;
-    if (!Read.parse(buff, root))
-    {
-        cout << "JSON解析失败" << endl;
-        return;
-    }
-
-    // 判断是否成功
-    if (root["status"].asString() != "OK")
-    {
+    if (response["status"].asString() != "OK") {
         cout << endl;
         cout << "+----------------------------------------+" << endl;
         cout << "|            登录失败" << endl;
@@ -185,8 +198,7 @@ void TcpClient::User_Login()
         return;
     }
 
-    // 登录成功！保存用户名
-    username = root["user_name"].asString();
+    username = response["user_name"].asString();
     login_status = true;
     
     cout << endl;
@@ -197,29 +209,30 @@ void TcpClient::User_Login()
 }
 
 // 显示菜单并获取用户选择
-// 根据登录状态显示不同菜单
 void TcpClient::Print_info()
 {
     cout << endl;
     cout << "+----------------------------------------+" << endl;
-    if (login_status)
-    {
-        // 已登录：显示业务菜单
+    if (login_status) {
         cout << "|        欢迎，" << username << endl;
         cout << "+----------------------------------------+" << endl;
         cout << "|  1. 查看票务" << endl;
         cout << "|  2. 预约票务" << endl;
         cout << "|  3. 我的预约" << endl;
         cout << "|  4. 取消预约" << endl;
-        cout << "|  5. 退出" << endl;
+        cout << "|  5. 上传文件" << endl;
+        cout << "|  6. 退出" << endl;
         cout << "+----------------------------------------+" << endl;
-        cout << "|  选择 (1-5): ";
+        cout << "|  选择 (1-6): ";
         cin >> op_type;
-        op_type += 2;  // 用户选1对应枚举值3（SHOW_TICKET）
-    }
-    else
-    {
-        // 未登录：显示登录/注册菜单
+        if (op_type >= 1 && op_type <= 4) {
+            op_type += 2;  // 1->3, 2->4, 3->5, 4->6
+        } else if (op_type == 5) {
+            op_type = UPLOAD_FILE;
+        } else if (op_type == 6) {
+            op_type = EXIT;
+        }
+    } else {
         cout << "|        预约系统" << endl;
         cout << "+----------------------------------------+" << endl;
         cout << "|  1. 登录" << endl;
@@ -234,42 +247,23 @@ void TcpClient::Print_info()
 }
 
 // 查看票务列表
-// 步骤：发送请求 -> 接收响应 -> 显示列表
 void TcpClient::Show_Ticket()
 {
-    // 构造JSON请求（只需type）
-    Json::Value val;
-    val["type"] = SHOW_TICKET;
-    string send_str = val.toStyledString();
-    send(sockfd, send_str.c_str(), send_str.size(), 0);
-
-    // 接收响应
-    char buff[1024] = {0};
-    if (recv(sockfd, buff, 1023, 0) <= 0)
-    {
-        cout << "服务器断开" << endl;
+    Json::Value request;
+    request["type"] = SHOW_TICKET;
+    
+    Json::Value response;
+    if (!Send_Request(CMD_SHOW_TICKET, request, response)) {
         return;
     }
 
-    // 解析JSON
-    Json::Value res_val;
-    Json::Reader Read;
-    if (!Read.parse(buff, res_val))
-    {
-        cout << "解析失败" << endl;
-        return;
-    }
-
-    // 判断是否成功
-    if (res_val["status"].asString() != "OK")
-    {
+    if (response["status"].asString() != "OK") {
         cout << "获取失败" << endl;
         return;
     }
 
-    int num = res_val["num"].asInt();
-    if (num == 0)
-    {
+    int num = response["num"].asInt();
+    if (num == 0) {
         cout << endl;
         cout << "+----------------------------------------+" << endl;
         cout << "|       暂无票务" << endl;
@@ -277,7 +271,6 @@ void TcpClient::Show_Ticket()
         return;
     }
 
-    // 显示票务列表
     cout << endl;
     cout << "+----------------------------------------+" << endl;
     cout << "|            票务列表" << endl;
@@ -285,24 +278,22 @@ void TcpClient::Show_Ticket()
     cout << "| ID | 名称         | 总数 | 已约 | 日期" << endl;
     cout << "+----------------------------------------+" << endl;
     
-    for (int i = 0; i < num; i++)
-    {
+    for (int i = 0; i < num; i++) {
         printf("|%3s | %-13s | %4s | %4s | %s |\n",
-               res_val["ticket_arr"][i]["ticket_id"].asCString(),
-               res_val["ticket_arr"][i]["ticket_name"].asCString(),
-               res_val["ticket_arr"][i]["ticket_max"].asCString(),
-               res_val["ticket_arr"][i]["ticket_count"].asCString(),
-               res_val["ticket_arr"][i]["day_time"].asCString());
+               response["ticket_arr"][i]["ticket_id"].asCString(),
+               response["ticket_arr"][i]["ticket_name"].asCString(),
+               response["ticket_arr"][i]["ticket_max"].asCString(),
+               response["ticket_arr"][i]["ticket_count"].asCString(),
+               response["ticket_arr"][i]["day_time"].asCString());
     }
     
     cout << "+----------------------------------------+" << endl;
 }
 
 // 预约票务
-// 步骤：先显示列表 -> 输入ID -> 发送请求
 void TcpClient::YD_Ticket()
 {
-    Show_Ticket();  // 先显示票务列表供用户选择
+    Show_Ticket();
     
     cout << endl;
     cout << "+----------------------------------------+" << endl;
@@ -312,36 +303,17 @@ void TcpClient::YD_Ticket()
     int index;
     cin >> index;
     
-    // 构造JSON请求
-    Json::Value val;
-    val["type"] = BOOK_TICKET;
-    val["user_tel"] = usertel;
-    val["ticket_id"] = to_string(index);
+    Json::Value request;
+    request["type"] = BOOK_TICKET;
+    request["user_tel"] = usertel;
+    request["ticket_id"] = to_string(index);
     
-    // 发送请求
-    send(sockfd, val.toStyledString().c_str(), strlen(val.toStyledString().c_str()), 0);
-    
-    // 接收响应
-    char buff[128] = {0};
-    int n = recv(sockfd, buff, 127, 0);
-    if (n <= 0)
-    {
-        cout << "服务器断开" << endl;
+    Json::Value response;
+    if (!Send_Request(CMD_ORDER, request, response)) {
         return;
     }
     
-    // 解析JSON
-    Json::Value res_val;
-    Json::Reader Read;
-    if (!Read.parse(buff, res_val))
-    {
-        cout << "解析失败" << endl;
-        return;
-    }
-    
-    // 判断是否成功
-    if (res_val["status"].asString() != "OK")
-    {
+    if (response["status"].asString() != "OK") {
         cout << endl;
         cout << "+----------------------------------------+" << endl;
         cout << "|          预约失败" << endl;
@@ -356,45 +328,24 @@ void TcpClient::YD_Ticket()
 }
 
 // 查看我的预约
-// 步骤：发送请求 -> 接收响应 -> 显示列表
 void TcpClient::Show_My_Yuyue()
 {
-    // 构造JSON请求
-    Json::Value val;
-    val["type"] = MY_BOOKINGS;
-    val["user_tel"] = usertel;
+    Json::Value request;
+    request["type"] = MY_BOOKINGS;
+    request["user_tel"] = usertel;
     
-    // 发送请求
-    send(sockfd, val.toStyledString().c_str(), strlen(val.toStyledString().c_str()), 0);
-
-    // 接收响应
-    char buff[1024] = {0};
-    int n = recv(sockfd, buff, 1023, 0);
-    if (n <= 0)
-    {
-        cout << "服务器断开" << endl;
+    Json::Value response;
+    if (!Send_Request(CMD_SHOW_ORDER, request, response)) {
         return;
     }
 
-    // 解析JSON
-    Json::Value res_val;
-    Json::Reader Read;
-    if (!Read.parse(buff, res_val))
-    {
-        cout << "解析失败" << endl;
-        return;
-    }
-
-    // 判断是否成功
-    if (res_val["status"].asString() != "OK")
-    {
+    if (response["status"].asString() != "OK") {
         cout << "获取失败" << endl;
         return;
     }
 
-    int num = res_val["num"].asInt();
-    if (num == 0)
-    {
+    int num = response["num"].asInt();
+    if (num == 0) {
         cout << endl;
         cout << "+----------------------------------------+" << endl;
         cout << "|          暂无预约" << endl;
@@ -402,7 +353,6 @@ void TcpClient::Show_My_Yuyue()
         return;
     }
 
-    // 显示我的预约列表
     cout << endl;
     cout << "+----------------------------------------+" << endl;
     cout << "|            我的预约" << endl;
@@ -410,23 +360,21 @@ void TcpClient::Show_My_Yuyue()
     cout << "| ID | 名称         | 日期     | 预约时间" << endl;
     cout << "+----------------------------------------+" << endl;
     
-    for (int i = 0; i < num; i++)
-    {
+    for (int i = 0; i < num; i++) {
         printf("|%3s | %-13s | %s | %s |\n",
-               res_val["yuyue_arr"][i]["ticket_id"].asCString(),
-               res_val["yuyue_arr"][i]["ticket_name"].asCString(),
-               res_val["yuyue_arr"][i]["day_time"].asCString(),
-               res_val["yuyue_arr"][i]["yuyue_time"].asCString());
+               response["yuyue_arr"][i]["ticket_id"].asCString(),
+               response["yuyue_arr"][i]["ticket_name"].asCString(),
+               response["yuyue_arr"][i]["day_time"].asCString(),
+               response["yuyue_arr"][i]["yuyue_time"].asCString());
     }
     
     cout << "+----------------------------------------+" << endl;
 }
 
 // 取消预约
-// 步骤：先显示我的预约 -> 输入ID -> 发送请求
 void TcpClient::Cancel_Yuyue()
 {
-    Show_My_Yuyue();  // 先显示我的预约列表
+    Show_My_Yuyue();
     
     cout << endl;
     cout << "+----------------------------------------+" << endl;
@@ -436,36 +384,17 @@ void TcpClient::Cancel_Yuyue()
     int index;
     cin >> index;
 
-    // 构造JSON请求
-    Json::Value val;
-    val["type"] = CANCEL_BOOKING;
-    val["user_tel"] = usertel;
-    val["ticket_id"] = to_string(index);
+    Json::Value request;
+    request["type"] = CANCEL_BOOKING;
+    request["user_tel"] = usertel;
+    request["ticket_id"] = to_string(index);
     
-    // 发送请求
-    send(sockfd, val.toStyledString().c_str(), strlen(val.toStyledString().c_str()), 0);
-
-    // 接收响应
-    char buff[128] = {0};
-    int n = recv(sockfd, buff, 127, 0);
-    if (n <= 0)
-    {
-        cout << "服务器断开" << endl;
+    Json::Value response;
+    if (!Send_Request(CMD_CANCEL, request, response)) {
         return;
     }
 
-    // 解析JSON
-    Json::Value res_val;
-    Json::Reader Read;
-    if (!Read.parse(buff, res_val))
-    {
-        cout << "解析失败" << endl;
-        return;
-    }
-
-    // 判断是否成功
-    if (res_val["status"].asString() != "OK")
-    {
+    if (response["status"].asString() != "OK") {
         cout << endl;
         cout << "+----------------------------------------+" << endl;
         cout << "|          取消失败" << endl;
@@ -479,6 +408,153 @@ void TcpClient::Cancel_Yuyue()
     cout << "+----------------------------------------+" << endl;
 }
 
+// 文件上传（支持大文件和断点续传）
+void TcpClient::Upload_File()
+{
+    cout << endl;
+    cout << "+----------------------------------------+" << endl;
+    cout << "|          文件上传" << endl;
+    cout << "+----------------------------------------+" << endl;
+    cout << "|  请输入文件路径: ";
+    
+    string filepath;
+    cin.ignore();  // 忽略前面的换行
+    getline(cin, filepath);
+    
+    // 检查文件是否存在
+    size_t file_size = get_file_size(filepath);
+    if (file_size == 0) {
+        cout << "| 文件不存在或为空" << endl;
+        cout << "+----------------------------------------+" << endl;
+        return;
+    }
+    
+    string filename = get_file_basename(filepath);
+    cout << "| 文件名: " << filename << endl;
+    cout << "| 文件大小: " << file_size << " 字节" << endl;
+    
+    // 步骤1：检查断点
+    Json::Value check_req;
+    check_req["file_name"] = filename;
+    Json::Value check_res;
+    if (!Send_Request(CMD_FILE_CHECK, check_req, check_res)) {
+        cout << "| 检查断点失败" << endl;
+        cout << "+----------------------------------------+" << endl;
+        return;
+    }
+    
+    size_t offset = 0;
+    bool file_exists = check_res["exists"].asBool();
+    if (file_exists) {
+        offset = check_res["offset"].asUInt64();
+        cout << "| 发现断点，从偏移 " << offset << " 继续上传" << endl;
+    } else {
+        cout << "| 新文件，从开头开始上传" << endl;
+    }
+    
+    // 步骤2：开始上传
+    Json::Value start_req;
+    start_req["file_name"] = filename;
+    start_req["file_size"] = (Json::UInt64)file_size;
+    Json::Value start_res;
+    if (!Send_Request(CMD_FILE_START, start_req, start_res)) {
+        cout << "| 开始上传失败" << endl;
+        cout << "+----------------------------------------+" << endl;
+        return;
+    }
+    
+    if (start_res["status"].asString() != "OK") {
+        cout << "| 开始上传失败" << endl;
+        cout << "+----------------------------------------+" << endl;
+        return;
+    }
+    
+    // 再次确认offset（服务器可能有不同的偏移）
+    offset = start_res["offset"].asUInt64();
+    
+    // 打开文件
+    int fd = open(filepath.c_str(), O_RDONLY);
+    if (fd < 0) {
+        cout << "| 无法打开文件" << endl;
+        cout << "+----------------------------------------+" << endl;
+        return;
+    }
+    
+    // 移动到指定偏移
+    if (offset > 0) {
+        lseek(fd, offset, SEEK_SET);
+    }
+    
+    // 步骤3：分块上传
+    const size_t CHUNK_SIZE = 8192;  // 每块8KB
+    char chunk[CHUNK_SIZE];
+    bool success = true;
+    size_t total_sent = offset;
+    
+    cout << "| 上传进度: ";
+    cout.flush();
+    
+    while (offset < file_size) {
+        // 读取文件块
+        ssize_t read_size = read(fd, chunk, CHUNK_SIZE);
+        if (read_size <= 0) break;
+        
+        // 构造请求
+        Json::Value chunk_req;
+        chunk_req["offset"] = (Json::UInt64)offset;
+        chunk_req["data"] = string(chunk, read_size);
+        
+        Json::Value chunk_res;
+        if (!Send_Request(CMD_FILE_CHUNK, chunk_req, chunk_res)) {
+            success = false;
+            break;
+        }
+        
+        if (chunk_res["status"].asString() != "OK") {
+            success = false;
+            break;
+        }
+        
+        offset += read_size;
+        total_sent += read_size;
+        
+        // 显示进度
+        int percent = (int)((offset * 100) / file_size);
+        cout << "\r| 上传进度: " << percent << "%";
+        cout.flush();
+    }
+    
+    cout << endl;
+    close(fd);
+    
+    if (!success) {
+        cout << "| 上传过程中失败" << endl;
+        cout << "+----------------------------------------+" << endl;
+        return;
+    }
+    
+    // 步骤4：结束上传
+    Json::Value end_req;  // 空请求
+    Json::Value end_res;
+    if (!Send_Request(CMD_FILE_END, end_req, end_res)) {
+        cout << "| 结束上传失败" << endl;
+        cout << "+----------------------------------------+" << endl;
+        return;
+    }
+    
+    if (end_res["status"].asString() != "OK") {
+        cout << "| 上传失败" << endl;
+        cout << "+----------------------------------------+" << endl;
+        return;
+    }
+    
+    cout << "+----------------------------------------+" << endl;
+    cout << "|          上传成功!" << endl;
+    cout << "| 文件: " << end_res["file_name"].asString() << endl;
+    cout << "| 大小: " << end_res["file_size"].asUInt64() << " 字节" << endl;
+    cout << "+----------------------------------------+" << endl;
+}
+
 // main函数：程序入口
 int main()
 {
@@ -486,14 +562,12 @@ int main()
     cout << "|        预约系统客户端" << endl;
     cout << "+----------------------------------------+" << endl;
     
-    // 创建客户端对象
     TcpClient mycli;
-    if (!mycli.Socket_Init())
-    {
+    if (!mycli.Socket_Init()) {
         cout << "连接失败" << endl;
         return 1;
     }
-    mycli.run();  // 运行客户端主循环
+    mycli.run();
     
     return 0;
 }

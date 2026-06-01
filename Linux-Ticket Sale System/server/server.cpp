@@ -598,35 +598,29 @@ void ListenSocket::Handle_Data()
 }
 
 // 发送成功响应
-// 使用自定义协议封装响应数据
 void ConnectSocket::Send_OK()
 {
     Json::Value tmp;
     tmp["status"] = "OK";
     string resp = tmp.toStyledString();
-    // 用协议封装响应数据
     string packet = ProtocolHandler::pack(CMD_EXIT, resp);
     send(m_fd, packet.c_str(), packet.length(), 0);
 }
 
 // 发送失败响应
-// 使用自定义协议封装响应数据
 void ConnectSocket::Send_ERR()
 {
     Json::Value tmp;
     tmp["status"] = "ERR";
     string resp = tmp.toStyledString();
-    // 用协议封装响应数据
     string packet = ProtocolHandler::pack(CMD_EXIT, resp);
     send(m_fd, packet.c_str(), packet.length(), 0);
 }
 
 // 发送JSON对象响应
-// 使用自定义协议封装响应数据
 void ConnectSocket::Send_Jsonobj(Json::Value &root)
 {
     string resp = root.toStyledString();
-    // 用协议封装响应数据，使用CMD_EXIT作为通用响应命令
     string packet = ProtocolHandler::pack(CMD_EXIT, resp);
     send(m_fd, packet.c_str(), packet.length(), 0);
 }
@@ -762,8 +756,8 @@ void ConnectSocket::Cancel_Yuyue()
 // 使用自定义TCP协议处理粘包拆包问题
 void ConnectSocket::Handle_Data()
 {
-    char buff[1024] = {0};
-    int n = recv(m_fd, buff, 1023, 0);
+    char buff[4096] = {0};
+    int n = recv(m_fd, buff, 4095, 0);
     if (n <= 0)
     {
         LOG_INFO << "客户端断开连接 - fd=" << m_fd;
@@ -775,8 +769,13 @@ void ConnectSocket::Handle_Data()
     std::string data;
     uint8_t cmd;
     // 循环解析，可能收到多个数据包
-    while (m_protocol.receive_and_parse(buff, n, data, cmd)) {
+    // 注意：只第一次调用时传入数据，避免重复追加
+    bool first = true;
+    while (m_protocol.receive_and_parse(first ? buff : nullptr, first ? n : 0, data, cmd)) {
+        first = false;
         // 转换命令类型（新协议枚举 -> 原枚举）
+        bool is_file_cmd = false;
+        
         switch(cmd) {
             case CMD_LOGIN: m_op_type = LOGIN; break;
             case CMD_REGISTER: m_op_type = REGISTER; break;
@@ -785,6 +784,10 @@ void ConnectSocket::Handle_Data()
             case CMD_SHOW_ORDER: m_op_type = MY_BOOKINGS; break;
             case CMD_CANCEL: m_op_type = CANCEL_BOOKING; break;
             case CMD_EXIT: m_op_type = EXIT; break;
+            case CMD_FILE_START: is_file_cmd = true; break;
+            case CMD_FILE_CHUNK: is_file_cmd = true; break;
+            case CMD_FILE_END: is_file_cmd = true; break;
+            case CMD_FILE_CHECK: is_file_cmd = true; break;
             default: m_op_type = -1; break;
         }
         
@@ -797,19 +800,30 @@ void ConnectSocket::Handle_Data()
             return;
         }
         
-        LOG_DEBUG << "收到协议数据包 - cmd=" << (int)cmd << ", data=" << data;
+        LOG_DEBUG << "收到协议数据包 - cmd=" << (int)cmd << ", data=" << (data.size() > 100 ? data.substr(0, 100) + "..." : data);
         
         // 处理业务逻辑
-        switch (m_op_type)
-        {
-        case LOGIN: User_Login(); break;
-        case REGISTER: User_Register(); break;
-        case SHOW_TICKET: Show_Ticket(); break;
-        case BOOK_TICKET: Yd_Ticket(); break;
-        case MY_BOOKINGS: Show_My_Yuyue(); break;
-        case CANCEL_BOOKING: Cancel_Yuyue(); break;
-        case EXIT: LOG_INFO << "客户端请求退出"; break;
-        default: LOG_WARN << "未知操作类型: " << m_op_type; break;
+        if (is_file_cmd) {
+            // 文件上传相关命令
+            switch(cmd) {
+                case CMD_FILE_START: File_Start(); break;
+                case CMD_FILE_CHUNK: File_Chunk(); break;
+                case CMD_FILE_END: File_End(); break;
+                case CMD_FILE_CHECK: File_Check(); break;
+            }
+        } else {
+            // 原有功能命令
+            switch (m_op_type)
+            {
+            case LOGIN: User_Login(); break;
+            case REGISTER: User_Register(); break;
+            case SHOW_TICKET: Show_Ticket(); break;
+            case BOOK_TICKET: Yd_Ticket(); break;
+            case MY_BOOKINGS: Show_My_Yuyue(); break;
+            case CANCEL_BOOKING: Cancel_Yuyue(); break;
+            case EXIT: LOG_INFO << "客户端请求退出"; break;
+            default: LOG_WARN << "未知操作类型: " << m_op_type; break;
+            }
         }
     }
 
@@ -917,6 +931,120 @@ bool TcpServer::create_socket()
     }
     
     return true;
+}
+
+// 文件上传开始
+void ConnectSocket::File_Start()
+{
+    LOG_INFO << "[FILE] 收到文件上传开始请求";
+    
+    std::string file_name = m_request["file_name"].asString();
+    size_t file_size = m_request["file_size"].asUInt64();
+    
+    // 创建上传目录
+    system("mkdir -p uploads");
+    
+    // 打开文件，支持断点续传（追加模式）
+    std::string file_path = "uploads/" + file_name;
+    m_file_fd = open(file_path.c_str(), O_WRONLY | O_CREAT, 0644);
+    if (m_file_fd < 0) {
+        LOG_ERROR << "无法创建文件: " << file_path;
+        Send_ERR();
+        return;
+    }
+    
+    // 移到文件末尾，支持断点续传
+    m_file_offset = lseek(m_file_fd, 0, SEEK_END);
+    m_file_name = file_name;
+    m_file_size = file_size;
+    
+    LOG_INFO << "[FILE] 文件准备就绪: " << file_name << ", 偏移: " << m_file_offset << "/" << file_size;
+    
+    Json::Value res;
+    res["status"] = "OK";
+    res["offset"] = (Json::UInt64)m_file_offset;
+    Send_Jsonobj(res);
+}
+
+// 文件块上传
+void ConnectSocket::File_Chunk()
+{
+    if (m_file_fd < 0) {
+        LOG_ERROR << "文件未打开";
+        Send_ERR();
+        return;
+    }
+    
+    // data字段包含文件数据
+    std::string file_data = m_request["data"].asString();
+    size_t chunk_offset = m_request["offset"].asUInt64();
+    
+    // 验证偏移
+    if (chunk_offset != m_file_offset) {
+        LOG_ERROR << "偏移不匹配: " << chunk_offset << " != " << m_file_offset;
+        Send_ERR();
+        return;
+    }
+    
+    // 写入文件
+    ssize_t bytes_written = write(m_file_fd, file_data.c_str(), file_data.size());
+    if (bytes_written < 0) {
+        LOG_ERROR << "写入文件失败";
+        Send_ERR();
+        return;
+    }
+    
+    m_file_offset += bytes_written;
+    
+    LOG_DEBUG << "[FILE] 写入块: " << bytes_written << " bytes, 偏移: " << m_file_offset;
+    
+    Json::Value res;
+    res["status"] = "OK";
+    res["offset"] = (Json::UInt64)m_file_offset;
+    Send_Jsonobj(res);
+}
+
+// 文件上传结束
+void ConnectSocket::File_End()
+{
+    if (m_file_fd >= 0) {
+        close(m_file_fd);
+        m_file_fd = -1;
+    }
+    
+    LOG_INFO << "[FILE] 文件上传完成: " << m_file_name << ", 总大小: " << m_file_offset;
+    
+    Json::Value res;
+    res["status"] = "OK";
+    res["file_name"] = m_file_name;
+    res["file_size"] = (Json::UInt64)m_file_offset;
+    Send_Jsonobj(res);
+}
+
+// 检查文件断点
+void ConnectSocket::File_Check()
+{
+    std::string file_name = m_request["file_name"].asString();
+    std::string file_path = "uploads/" + file_name;
+    
+    // 检查文件是否存在
+    struct stat st;
+    Json::Value res;
+    
+    if (stat(file_path.c_str(), &st) == 0 && S_ISREG(st.st_mode)) {
+        res["status"] = "OK";
+        res["exists"] = true;
+        res["offset"] = (Json::UInt64)st.st_size;
+        res["file_size"] = (Json::UInt64)st.st_size;
+        LOG_INFO << "[FILE] 检查断点: " << file_name << ", 已存在: " << st.st_size << " bytes";
+    } else {
+        res["status"] = "OK";
+        res["exists"] = false;
+        res["offset"] = 0;
+        LOG_INFO << "[FILE] 检查断点: " << file_name << ", 不存在";
+    }
+    
+    Send_Jsonobj(res);
 }
 
 // main函数：程序入口

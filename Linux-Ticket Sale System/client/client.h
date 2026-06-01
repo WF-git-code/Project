@@ -5,7 +5,8 @@
 // 1. 连接服务器
 // 2. 用户注册/登录
 // 3. 查看/预约/取消票务
-// 4. 与服务器通信（JSON格式）
+// 4. 与服务器通信（使用自定义协议）
+// 5. 文件上传（支持大文件和断点续传）
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -14,9 +15,14 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 #include <iostream>
 #include <string>
 #include <jsoncpp/json/json.h>
+
+// 引入服务器的协议头文件
+#include "../server/Protocol.hpp"
 
 using namespace std;
 
@@ -29,7 +35,8 @@ enum OpType
     BOOK_TICKET = 4,    // 预约票务
     MY_BOOKINGS = 5,    // 我的预约
     CANCEL_BOOKING = 6, // 取消预约
-    EXIT = 7            // 退出
+    UPLOAD_FILE = 8,    // 文件上传
+    EXIT = 9            // 退出
 };
 
 // TCP客户端类
@@ -45,6 +52,7 @@ public:
         runing = true;      // 标记运行状态为真
         login_status = false;  // 初始状态未登录
         op_type = -1;       // 操作类型初始化为-1
+        sockfd = -1;
     }
 
     // 默认构造函数
@@ -56,6 +64,7 @@ public:
         runing = true;      // 运行状态
         login_status = false;  // 未登录
         op_type = -1;       // 操作类型
+        sockfd = -1;
     }
 
     // 初始化Socket连接
@@ -95,6 +104,15 @@ private:
     // 取消预约
     void Cancel_Yuyue();
 
+    // 文件上传
+    void Upload_File();
+    
+    // 辅助函数：发送请求并接收响应
+    bool Send_Request(uint8_t cmd, const Json::Value &request, Json::Value &response);
+    
+    // 辅助函数：接收服务器响应（解析协议）
+    bool Receive_Response(Json::Value &response);
+
     string ips;         // 服务器IP地址
     short port;         // 服务器端口号
     int sockfd;         // Socket文件描述符
@@ -104,4 +122,6 @@ private:
     int op_type;        // 当前操作类型
     string username;    // 用户名
     string usertel;     // 用户手机号（账号）
+    
+    ProtocolHandler m_protocol; // 协议处理器
 };

@@ -45,7 +45,4 @@ add_executable(log_demo
     demo/LogCleanerDemo.cpp
 )
 
-add_custom_command(TARGET server POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy ${PROJECT_SOURCE_DIR}/my.conf ${PROJECT_SOURCE_DIR}/bin/my.conf
-    COMMENT "Copying my.conf to bin directory"
-)
+

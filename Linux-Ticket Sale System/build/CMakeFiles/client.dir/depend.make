@@ -3,4 +3,5 @@
 
 CMakeFiles/client.dir/client/client.cpp.o: ../client/client.cpp
 CMakeFiles/client.dir/client/client.cpp.o: ../client/client.h
+CMakeFiles/client.dir/client/client.cpp.o: ../server/Protocol.hpp
 

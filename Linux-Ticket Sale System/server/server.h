@@ -221,6 +221,17 @@ public:
     // 构造函数：调用基类构造函数，初始化操作类型
     ConnectSocket(int fd, int epfd) : Socket(fd, epfd) {
         m_op_type = -1;
+        m_file_fd = -1;
+        m_file_offset = 0;
+        m_file_size = 0;
+    }
+
+    // 析构函数：确保文件关闭
+    ~ConnectSocket() {
+        if (m_file_fd >= 0) {
+            close(m_file_fd);
+            m_file_fd = -1;
+        }
     }
 
     // 处理客户端数据：解析请求，处理业务，返回响应
@@ -230,6 +241,12 @@ private:
     int m_op_type;            // 解析出的操作类型
     Json::Value m_request;    // 解析出的JSON请求数据
     ProtocolHandler m_protocol; // 自定义TCP协议处理器，解决粘包拆包
+
+    // 文件上传相关
+    int m_file_fd;            // 文件描述符
+    std::string m_file_name;  // 文件名
+    size_t m_file_offset;     // 当前文件偏移（断点续传）
+    size_t m_file_size;       // 文件总大小
 
     // 重新注册epoll事件（EPOLLONESHOT）
     void ResetEvent();
@@ -263,6 +280,12 @@ private:
     
     // 取消预约处理函数
     void Cancel_Yuyue();
+
+    // 文件上传相关函数
+    void File_Start();        // 文件上传开始
+    void File_Chunk();        // 文件块上传
+    void File_End();          // 文件上传结束
+    void File_Check();        // 检查文件断点
 };
 
 // TCP服务器主类

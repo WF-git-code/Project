@@ -9,19 +9,22 @@
 #include <vector>
 #include <cstdint>
 #include <cstring>
+#include <arpa/inet.h>
 
 // 协议魔数，用于标识有效数据包
 constexpr uint32_t PROTOCOL_MAGIC = 0xCAFEBABE;
 
-// 协议头大小
-constexpr size_t PROTOCOL_HEADER_SIZE = sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint8_t);
-
-// 协议头结构
+// 协议头结构（使用1字节对齐，避免内存对齐问题）
+#pragma pack(push, 1)
 struct ProtocolHeader {
-    uint32_t magic;     // 魔数 0xCAFEBABE
-    uint32_t length;    // 数据长度（不包含协议头）
+    uint32_t magic;     // 魔数 0xCAFEBABE (网络字节序)
+    uint32_t length;    // 数据长度（不包含协议头, 网络字节序）
     uint8_t command;    // 命令类型
 };
+#pragma pack(pop)
+
+// 协议头大小（固定9字节）
+constexpr size_t PROTOCOL_HEADER_SIZE = 9;
 
 // 命令类型定义
 enum CommandType {
@@ -32,7 +35,12 @@ enum CommandType {
     CMD_CANCEL = 0x05,       // 取消订票
     CMD_SHOW_ORDER = 0x06,   // 查看订单
     CMD_LOGOUT = 0x07,       // 登出
-    CMD_EXIT = 0x08          // 退出
+    CMD_EXIT = 0x08,         // 退出
+    // 文件上传相关命令
+    CMD_FILE_START = 0x09,   // 文件上传开始
+    CMD_FILE_CHUNK = 0x0A,   // 文件块上传
+    CMD_FILE_END = 0x0B,     // 文件上传结束
+    CMD_FILE_CHECK = 0x0C    // 检查文件断点
 };
 
 // 协议处理类
@@ -47,34 +55,18 @@ public:
 
     ~ProtocolHandler() = default;
 
-    // 大端序转换：主机字节序 -> 网络字节序
-    static uint32_t htonl_custom(uint32_t hostlong) {
-        return ((hostlong & 0xFF) << 24) |
-               ((hostlong & 0xFF00) << 8) |
-               ((hostlong & 0xFF0000) >> 8) |
-               ((hostlong & 0xFF000000) >> 24);
-    }
-
-    // 大端序转换：网络字节序 -> 主机字节序
-    static uint32_t ntohl_custom(uint32_t netlong) {
-        return ((netlong & 0xFF) << 24) |
-               ((netlong & 0xFF00) << 8) |
-               ((netlong & 0xFF0000) >> 8) |
-               ((netlong & 0xFF000000) >> 24);
-    }
-
     // 封装协议数据
     static std::string pack(uint8_t command, const std::string& data) {
         std::string result;
         
         // 构建协议头
         ProtocolHeader header;
-        header.magic = PROTOCOL_MAGIC;
-        header.length = htonl_custom(static_cast<uint32_t>(data.size()));
+        header.magic = htonl(PROTOCOL_MAGIC);  // 魔数转网络字节序
+        header.length = htonl(static_cast<uint32_t>(data.size()));  // 长度转网络字节序
         header.command = command;
         
-        // 添加协议头
-        result.append(reinterpret_cast<const char*>(&header), sizeof(header));
+        // 添加协议头（9字节）
+        result.append(reinterpret_cast<const char*>(&header), PROTOCOL_HEADER_SIZE);
         // 添加数据部分
         result.append(data);
         
@@ -87,23 +79,26 @@ public:
     // output_cmd: 解析出的命令类型
     bool receive_and_parse(const char* data, size_t len, 
                            std::string& output_data, uint8_t& output_cmd) {
-        // 将新数据追加到缓冲区
-        buffer_.insert(buffer_.end(), data, data + len);
+        // 将新数据追加到缓冲区（如果有的话）
+        if (data != nullptr && len > 0) {
+            buffer_.insert(buffer_.end(), data, data + len);
+        }
         
         // 循环尝试解析数据包
         while (buffer_.size() >= PROTOCOL_HEADER_SIZE) {
             // 读取协议头
             ProtocolHeader* header = reinterpret_cast<ProtocolHeader*>(buffer_.data());
             
-            // 检查魔数是否正确
-            if (header->magic != PROTOCOL_MAGIC) {
+            // 检查魔数是否正确 (网络字节序转主机字节序再比较)
+            uint32_t magic_host = ntohl(header->magic);
+            if (magic_host != PROTOCOL_MAGIC) {
                 // 魔数不匹配，丢弃一个字节继续找
                 buffer_.erase(buffer_.begin());
                 continue;
             }
             
             // 获取数据长度（网络字节序转主机字节序）
-            uint32_t data_len = ntohl_custom(header->length);
+            uint32_t data_len = ntohl(header->length);
             
             // 计算完整数据包大小
             size_t packet_size = PROTOCOL_HEADER_SIZE + data_len;
