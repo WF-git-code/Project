@@ -10,6 +10,13 @@
 
 #include "server.h"
 
+// Redis库存操作函数声明
+bool Redis_Deduct_Stock(const std::string& ticket_id, int quantity);
+bool Redis_Set_Stock(const std::string& ticket_id, int stock);
+int Redis_Get_Stock(const std::string& ticket_id);
+bool Redis_Restore_Stock(const std::string& ticket_id, int quantity);
+void Async_Write_Yuyue_To_MySQL(const std::string& usertel, const std::string& ticketid);
+
 // 从配置文件读取服务器配置
 // 这个函数会逐行读取配置文件，解析key-value对
 bool ServerConfig::ReadConf(string filename)
@@ -263,36 +270,10 @@ bool Cache_Delete_Ticket_List()
     return success;
 }
 
-// 获取Redis分布式锁
-bool Redis_Lock(const std::string &key, int timeout_ms)
-{
-    redis_pool::RedisConnectionGuard guard;
-    if (!guard.valid()) {
-        return false;
-    }
-
-    redisReply* reply = (redisReply*)redisCommand(guard.get(), "SET %s 1 NX PX %d", key.c_str(), timeout_ms);
-    bool success = reply && reply->type == REDIS_REPLY_STATUS && strcmp(reply->str, "OK") == 0;
-    if (reply) freeReplyObject(reply);
-    return success;
-}
-
-// 释放Redis分布式锁
-bool Redis_Unlock(const std::string &key)
-{
-    redis_pool::RedisConnectionGuard guard;
-    if (!guard.valid()) {
-        return false;
-    }
-
-    redisReply* reply = (redisReply*)redisCommand(guard.get(), "DEL %s", key.c_str());
-    bool success = reply && reply->type == REDIS_REPLY_INTEGER;
-    if (reply) freeReplyObject(reply);
-    return success;
-}
 
 // 全局配置指针
 static ServerConfig* g_config = nullptr;
+static CachedThreadPool* g_thread_pool = nullptr;  // 全局线程池指针
 
 // 查询所有可预约票务（带缓存）
 bool MysqlClient::Db_Show_Ticket(Json::Value &res)
@@ -358,79 +339,22 @@ bool MysqlClient::Db_Show_Ticket(Json::Value &res)
     return true;
 }
 
-// 预约票务（事务 + 分布式锁）
+// 预约票务（改进架构：Redis预扣库存 + Lua脚本 + 异步写入MySQL）
 bool MysqlClient::Db_Yd_Ticket(string& usertel, string& ticketid)
 {
-    // 获取分布式锁
-    std::string lock_key = "lock:ticket:" + ticketid;
-    bool has_lock = Redis_Lock(lock_key, 5000);
-    if (!has_lock) {
-        LOG_WARN << "[Redis] 获取锁失败: " << lock_key;
+    // 步骤1: Redis预扣库存（Lua脚本原子操作）
+    // 库存key格式: stock:ticket:{ticket_id}
+    if (!Redis_Deduct_Stock(ticketid, 1)) {
+        LOG_WARN << "[Stock] 库存不足或扣减失败: " << ticketid;
         return false;
     }
-    LOG_INFO << "[Redis] 获取锁成功: " << lock_key;
+    LOG_INFO << "[Stock] Redis库存预扣成功: " << ticketid;
 
-    bool result = false;
-    mysql_pool::ConnectionGuard guard;
-    if (!guard.valid())
-    {
-        LOG_ERROR << "获取数据库连接失败";
-        Redis_Unlock(lock_key);
-        return false;
-    }
+    // 步骤2: 异步写入MySQL（提高吞吐量）
+    // 主线程立即返回，后台线程处理数据库写入
+    Async_Write_Yuyue_To_MySQL(usertel, ticketid);
 
-    MYSQL* conn = guard.get();
-
-    mysql_query(conn, "BEGIN");
-
-    char escaped_tel[512] = {0};
-    mysql_real_escape_string(conn, escaped_tel, usertel.c_str(), usertel.length());
-
-    // 更新票务库存（乐观锁）
-    char sql_update[512] = {0};
-    snprintf(sql_update, sizeof(sql_update), 
-        "update ticket_table set tk_count = tk_count + 1 where tk_id = %s and tk_count < tk_max and status=1", 
-        ticketid.c_str());
-    
-    if (mysql_query(conn, sql_update) != 0)
-    {
-        mysql_query(conn, "ROLLBACK");
-        Redis_Unlock(lock_key);
-        return false;
-    }
-
-    if (mysql_affected_rows(conn) == 0)
-    {
-        mysql_query(conn, "ROLLBACK");
-        Redis_Unlock(lock_key);
-        return false;
-    }
-
-    // 插入预约记录
-    char sql_insert[2048] = {0};
-    snprintf(sql_insert, sizeof(sql_insert), 
-        "insert into yd_table(yd_id, tel, tk_id, ctime, status) values(0,'%s',%s,now(),1)", 
-        escaped_tel, ticketid.c_str());
-    
-    if (mysql_query(conn, sql_insert) != 0)
-    {
-        mysql_query(conn, "ROLLBACK");
-        Redis_Unlock(lock_key);
-        return false;
-    }
-
-    mysql_query(conn, "COMMIT");
-    result = true;
-
-    // 清除缓存
-    Cache_Delete_Ticket_List();
-    LOG_INFO << "[Redis] 缓存已清除: ticket:list";
-
-    // 释放锁
-    Redis_Unlock(lock_key);
-    LOG_INFO << "[Redis] 锁已释放: " << lock_key;
-
-    return result;
+    return true;
 }
 
 // 查询用户预约列表
@@ -489,76 +413,69 @@ bool MysqlClient::Db_Get_Yuyue(string& usertel, Json::Value& res)
     return true;
 }
 
-// 取消预约（事务 + 分布式锁）
+// 取消预约（改进架构：Redis恢复库存 + 异步写入MySQL）
 bool MysqlClient::Db_Cancel_Yuyue(string& usertel, string& ticketid)
 {
-    std::string lock_key = "lock:ticket:" + ticketid;
-    bool has_lock = Redis_Lock(lock_key, 5000);
-    if (!has_lock) {
-        LOG_WARN << "[Redis] 获取锁失败: " << lock_key;
+    // 步骤1: 恢复Redis库存
+    if (!Redis_Restore_Stock(ticketid, 1)) {
+        LOG_WARN << "[Stock] 恢复库存失败: " << ticketid;
         return false;
     }
-    LOG_INFO << "[Redis] 获取锁成功: " << lock_key;
+    LOG_INFO << "[Stock] Redis库存恢复成功: " << ticketid;
 
-    bool result = false;
-    mysql_pool::ConnectionGuard guard;
-    if (!guard.valid())
-    {
-        LOG_ERROR << "获取数据库连接失败";
-        Redis_Unlock(lock_key);
-        return false;
-    }
+    // 步骤2: 异步写入MySQL
+    g_thread_pool->Excute([usertel, ticketid]() {
+        mysql_pool::ConnectionGuard guard;
+        if (!guard.valid()) {
+            LOG_ERROR << "[Async] 获取数据库连接失败";
+            return;
+        }
 
-    MYSQL* conn = guard.get();
+        MYSQL* conn = guard.get();
+        mysql_query(conn, "BEGIN");
 
-    mysql_query(conn, "BEGIN");
+        char escaped_tel[512] = {0};
+        mysql_real_escape_string(conn, escaped_tel, usertel.c_str(), usertel.length());
 
-    char escaped_tel[512] = {0};
-    mysql_real_escape_string(conn, escaped_tel, usertel.c_str(), usertel.length());
+        // 更新预约状态为已取消
+        char sql_update_yd[2048] = {0};
+        snprintf(sql_update_yd, sizeof(sql_update_yd), 
+            "update yd_table set status=0 where tel = '%s' and tk_id = %s and status=1", 
+            escaped_tel, ticketid.c_str());
+        
+        if (mysql_query(conn, sql_update_yd) != 0) {
+            mysql_query(conn, "ROLLBACK");
+            LOG_ERROR << "[Async] 更新预约状态失败: " << usertel << ", " << ticketid;
+            return;
+        }
 
-    // 更新预约状态为已取消
-    char sql_update_yd[2048] = {0};
-    snprintf(sql_update_yd, sizeof(sql_update_yd), 
-        "update yd_table set status=0 where tel = '%s' and tk_id = %s and status=1", 
-        escaped_tel, ticketid.c_str());
-    
-    if (mysql_query(conn, sql_update_yd) != 0)
-    {
-        mysql_query(conn, "ROLLBACK");
-        Redis_Unlock(lock_key);
-        return false;
-    }
+        if (mysql_affected_rows(conn) == 0) {
+            mysql_query(conn, "ROLLBACK");
+            LOG_ERROR << "[Async] 无匹配的预约记录: " << usertel << ", " << ticketid;
+            return;
+        }
 
-    if (mysql_affected_rows(conn) == 0)
-    {
-        mysql_query(conn, "ROLLBACK");
-        Redis_Unlock(lock_key);
-        return false;
-    }
+        // 恢复票务库存
+        char sql_update_ticket[512] = {0};
+        snprintf(sql_update_ticket, sizeof(sql_update_ticket), 
+            "update ticket_table set tk_count = tk_count + 1 where tk_id = %s", 
+            ticketid.c_str());
+        
+        if (mysql_query(conn, sql_update_ticket) != 0) {
+            mysql_query(conn, "ROLLBACK");
+            LOG_ERROR << "[Async] 更新库存失败: " << ticketid;
+            return;
+        }
 
-    // 恢复票务库存
-    char sql_update_ticket[512] = {0};
-    snprintf(sql_update_ticket, sizeof(sql_update_ticket), 
-        "update ticket_table set tk_count = tk_count - 1 where tk_id = %s", 
-        ticketid.c_str());
-    
-    if (mysql_query(conn, sql_update_ticket) != 0)
-    {
-        mysql_query(conn, "ROLLBACK");
-        Redis_Unlock(lock_key);
-        return false;
-    }
+        mysql_query(conn, "COMMIT");
+        
+        // 清除缓存
+        Cache_Delete_Ticket_List();
+        
+        LOG_INFO << "[Async] 取消预约成功: " << usertel << ", " << ticketid;
+    });
 
-    mysql_query(conn, "COMMIT");
-    result = true;
-
-    Cache_Delete_Ticket_List();
-    LOG_INFO << "[Redis] 缓存已清除: ticket:list";
-
-    Redis_Unlock(lock_key);
-    LOG_INFO << "[Redis] 锁已释放: " << lock_key;
-
-    return result;
+    return true;
 }
 
 // 静态成员初始化
@@ -1101,8 +1018,240 @@ int main(int argc, char *argv[])
     LOG_INFO << "Redis连接池初始化完成，连接数: " << conf.redis_pool_size;
 
     TcpServer ser(conf);
+    g_thread_pool = &ser.m_thread_pool;  // 设置全局线程池指针
     ser.Run();
 
     logfile::LoggerManager::getInstance().stop();
     exit(0);
+}
+// 生成唯一锁值（线程ID + 时间戳 + 随机数）
+std::string Generate_Lock_Value()
+{
+    static std::atomic<uint64_t> counter(0);
+    uint64_t timestamp = std::chrono::system_clock::now().time_since_epoch().count();
+    uint64_t tid = std::hash<std::thread::id>()(std::this_thread::get_id());
+    uint64_t seq = counter.fetch_add(1);
+    return std::to_string(timestamp) + "_" + std::to_string(tid) + "_" + std::to_string(seq);
+}
+
+// 获取Redis分布式锁（带唯一ID）
+// 返回值：锁的唯一值，用于解锁时验证
+std::string Redis_Lock(const std::string &key, int timeout_ms)
+{
+    redis_pool::RedisConnectionGuard guard;
+    if (!guard.valid()) {
+        return "";
+    }
+
+    // 生成唯一锁值
+    std::string lock_value = Generate_Lock_Value();
+    
+    // SET key value NX PX timeout_ms
+    redisReply* reply = (redisReply*)redisCommand(guard.get(), "SET %s %s NX PX %d", 
+                                                   key.c_str(), lock_value.c_str(), timeout_ms);
+    
+    bool success = reply && reply->type == REDIS_REPLY_STATUS && strcmp(reply->str, "OK") == 0;
+    if (reply) freeReplyObject(reply);
+    
+    if (success) {
+        LOG_DEBUG << "[Redis] 获取锁成功: " << key << ", value: " << lock_value;
+        return lock_value;
+    } else {
+        LOG_DEBUG << "[Redis] 获取锁失败: " << key;
+        return "";
+    }
+}
+
+// 释放Redis分布式锁（使用Lua脚本保证原子性）
+bool Redis_Unlock(const std::string &key, const std::string &lock_value)
+{
+    redis_pool::RedisConnectionGuard guard;
+    if (!guard.valid()) {
+        return false;
+    }
+
+    // Lua脚本：只有当锁的值匹配时才删除，避免误删
+    // KEYS[1]: 锁的key
+    // ARGV[1]: 锁的唯一值
+    const char* lua_script = 
+        "if redis.call('GET', KEYS[1]) == ARGV[1] then "
+        "    return redis.call('DEL', KEYS[1]) "
+        "else "
+        "    return 0 "
+        "end";
+
+    redisReply* reply = (redisReply*)redisCommand(guard.get(), 
+                                                   "EVAL %s 1 %s %s", 
+                                                   lua_script, 
+                                                   key.c_str(), 
+                                                   lock_value.c_str());
+    
+    bool success = reply && reply->type == REDIS_REPLY_INTEGER && reply->integer == 1;
+    if (reply) freeReplyObject(reply);
+    
+    if (success) {
+        LOG_DEBUG << "[Redis] 释放锁成功: " << key << ", value: " << lock_value;
+    } else {
+        LOG_WARN << "[Redis] 释放锁失败(可能已过期或被其他线程持有): " << key;
+    }
+    
+    return success;
+}
+
+// Redis预扣库存（使用Lua脚本保证原子性）
+// KEYS[1]: 库存key
+// ARGV[1]: 扣减数量
+// 返回值: 1-成功, 0-失败
+bool Redis_Deduct_Stock(const std::string& ticket_id, int quantity)
+{
+    redis_pool::RedisConnectionGuard guard;
+    if (!guard.valid()) {
+        LOG_ERROR << "[Redis] 获取连接失败";
+        return false;
+    }
+
+    // Lua脚本：原子扣减库存，防止超卖
+    // 1. 检查库存是否存在且充足
+    // 2. 充足则扣减，返回1；否则返回0
+    const char* lua_script = 
+        "local stock_key = KEYS[1] "
+        "local quantity = tonumber(ARGV[1]) "
+        "local stock = redis.call('GET', stock_key) "
+        "if not stock then "
+        "    return 0 "
+        "end "
+        "if tonumber(stock) >= quantity then "
+        "    redis.call('DECRBY', stock_key, quantity) "
+        "    return 1 "
+        "else "
+        "    return 0 "
+        "end";
+
+    std::string stock_key = "stock:ticket:" + ticket_id;
+    
+    redisReply* reply = (redisReply*)redisCommand(guard.get(), 
+        "EVAL %s 1 %s %d", lua_script, stock_key.c_str(), quantity);
+    
+    bool success = reply && reply->type == REDIS_REPLY_INTEGER && reply->integer == 1;
+    if (reply) freeReplyObject(reply);
+    
+    if (success) {
+        LOG_INFO << "[Redis] 库存扣减成功: " << stock_key << ", 扣减数量: " << quantity;
+    } else {
+        LOG_WARN << "[Redis] 库存扣减失败(库存不足): " << stock_key;
+    }
+    
+    return success;
+}
+
+// Redis设置库存
+bool Redis_Set_Stock(const std::string& ticket_id, int stock)
+{
+    redis_pool::RedisConnectionGuard guard;
+    if (!guard.valid()) {
+        return false;
+    }
+
+    std::string stock_key = "stock:ticket:" + ticket_id;
+    redisReply* reply = (redisReply*)redisCommand(guard.get(), 
+        "SET %s %d", stock_key.c_str(), stock);
+    
+    bool success = reply && reply->type == REDIS_REPLY_STATUS && strcmp(reply->str, "OK") == 0;
+    if (reply) freeReplyObject(reply);
+    
+    return success;
+}
+
+// Redis获取库存
+int Redis_Get_Stock(const std::string& ticket_id)
+{
+    redis_pool::RedisConnectionGuard guard;
+    if (!guard.valid()) {
+        return -1;
+    }
+
+    std::string stock_key = "stock:ticket:" + ticket_id;
+    redisReply* reply = (redisReply*)redisCommand(guard.get(), "GET %s", stock_key.c_str());
+    
+    int stock = -1;
+    if (reply && reply->type == REDIS_REPLY_STRING) {
+        stock = atoi(reply->str);
+    }
+    if (reply) freeReplyObject(reply);
+    
+    return stock;
+}
+
+// Redis恢复库存（取消预约时使用）
+bool Redis_Restore_Stock(const std::string& ticket_id, int quantity)
+{
+    redis_pool::RedisConnectionGuard guard;
+    if (!guard.valid()) {
+        LOG_ERROR << "[Redis] 获取连接失败";
+        return false;
+    }
+
+    std::string stock_key = "stock:ticket:" + ticket_id;
+    redisReply* reply = (redisReply*)redisCommand(guard.get(), 
+        "INCRBY %s %d", stock_key.c_str(), quantity);
+    
+    bool success = reply && reply->type == REDIS_REPLY_INTEGER;
+    if (reply) freeReplyObject(reply);
+    
+    if (success) {
+        LOG_INFO << "[Redis] 库存恢复成功: " << stock_key << ", 恢复数量: " << quantity;
+    } else {
+        LOG_ERROR << "[Redis] 库存恢复失败: " << stock_key;
+    }
+    
+    return success;
+}
+
+// 异步写入MySQL（预约记录）
+void Async_Write_Yuyue_To_MySQL(const std::string& usertel, const std::string& ticketid)
+{
+    g_thread_pool->Excute([usertel, ticketid]() {
+        mysql_pool::ConnectionGuard guard;
+        if (!guard.valid()) {
+            LOG_ERROR << "[Async] 获取数据库连接失败";
+            return;
+        }
+
+        MYSQL* conn = guard.get();
+        mysql_query(conn, "BEGIN");
+
+        char escaped_tel[512] = {0};
+        mysql_real_escape_string(conn, escaped_tel, usertel.c_str(), usertel.length());
+
+        // 更新票务库存
+        char sql_update[512] = {0};
+        snprintf(sql_update, sizeof(sql_update), 
+            "update ticket_table set tk_count = tk_count - 1 where tk_id = %s", 
+            ticketid.c_str());
+        
+        if (mysql_query(conn, sql_update) != 0) {
+            mysql_query(conn, "ROLLBACK");
+            LOG_ERROR << "[Async] 更新库存失败: " << ticketid;
+            return;
+        }
+
+        // 插入预约记录
+        char sql_insert[2048] = {0};
+        snprintf(sql_insert, sizeof(sql_insert), 
+            "insert into yd_table(yd_id, tel, tk_id, ctime, status) values(0,'%s',%s,now(),1)", 
+            escaped_tel, ticketid.c_str());
+        
+        if (mysql_query(conn, sql_insert) != 0) {
+            mysql_query(conn, "ROLLBACK");
+            LOG_ERROR << "[Async] 插入预约记录失败: " << usertel << ", " << ticketid;
+            return;
+        }
+
+        mysql_query(conn, "COMMIT");
+        
+        // 清除缓存
+        Cache_Delete_Ticket_List();
+        
+        LOG_INFO << "[Async] 预约记录写入成功: " << usertel << ", " << ticketid;
+    });
 }

@@ -1,0 +1,29 @@
+2026/06/02-10:17:42.159791Z 139978934328192 INFO LoggerManager.hpp start 44  : 启动日志清理器，保留  : 7 :  天日志 : 
+2026/06/02-10:17:42.160271Z 139978934328192 INFO server.cpp main 995  : 加载配置文件:  : ../my.conf : 
+2026/06/02-10:17:42.160350Z 139978934328192 INFO server.cpp PrintInfo 92  : ========== Server Config ========== : 
+2026/06/02-10:17:42.160393Z 139978934328192 INFO server.cpp PrintInfo 93  : Listen IP:  : 127.0.0.1 : 
+2026/06/02-10:17:42.160417Z 139978934328192 INFO server.cpp PrintInfo 94  : Listen Port:  : 6000 : 
+2026/06/02-10:17:42.160447Z 139978934328192 INFO server.cpp PrintInfo 95  : Listen Max:  : 1024 : 
+2026/06/02-10:17:42.160483Z 139978934328192 INFO server.cpp PrintInfo 96  : Thread Core Num:  : 4 : 
+2026/06/02-10:17:42.160513Z 139978934328192 INFO server.cpp PrintInfo 97  : Thread Max Num:  : 17 : 
+2026/06/02-10:17:42.160621Z 139978934328192 INFO server.cpp PrintInfo 98  : Task Queue Max:  : 1024 : 
+2026/06/02-10:17:42.160669Z 139978934328192 INFO server.cpp PrintInfo 99  : Task Wait Time:  : 10 : us : 
+2026/06/02-10:17:42.160731Z 139978934328192 INFO server.cpp PrintInfo 100  : Thread Wait Time:  : 10 : s : 
+2026/06/02-10:17:42.160782Z 139978934328192 INFO server.cpp PrintInfo 101  : Enable Log Clean:  : 1 : 
+2026/06/02-10:17:42.160836Z 139978934328192 INFO server.cpp PrintInfo 102  : Log Keep Days:  : 7 :  days : 
+2026/06/02-10:17:42.160885Z 139978934328192 INFO server.cpp PrintInfo 103  : Log Directory:  : ./ : 
+2026/06/02-10:17:42.160944Z 139978934328192 INFO server.cpp PrintInfo 104  : DB Host:  : 127.0.0.1 : 
+2026/06/02-10:17:42.160996Z 139978934328192 INFO server.cpp PrintInfo 105  : DB Port:  : 3306 : 
+2026/06/02-10:17:42.161044Z 139978934328192 INFO server.cpp PrintInfo 106  : DB Name:  : epoll_project : 
+2026/06/02-10:17:42.161092Z 139978934328192 INFO server.cpp PrintInfo 107  : DB User:  : root : 
+2026/06/02-10:17:42.161116Z 139978934328192 INFO server.cpp PrintInfo 108  : DB Pool Size:  : 8 : 
+2026/06/02-10:17:42.161140Z 139978934328192 INFO server.cpp PrintInfo 109  : Redis Host:  : 127.0.0.1 : 
+2026/06/02-10:17:42.161164Z 139978934328192 INFO server.cpp PrintInfo 110  : Redis Port:  : 6379 : 
+2026/06/02-10:17:42.161191Z 139978934328192 INFO server.cpp PrintInfo 111  : Redis Pool Size:  : 4 : 
+2026/06/02-10:17:42.161216Z 139978934328192 INFO server.cpp PrintInfo 112  : Redis TTL:  : 300 : s : 
+2026/06/02-10:17:42.161276Z 139978934328192 INFO server.cpp PrintInfo 113  : =================================== : 
+2026/06/02-10:17:42.161336Z 139978934328192 INFO server.cpp main 999  : 初始化MySQL连接池... : 
+2026/06/02-10:17:42.308040Z 139978934328192 INFO server.cpp main 1008  : MySQL连接池初始化完成，连接数:  : 8 : 
+2026/06/02-10:17:42.308751Z 139978934328192 INFO server.cpp main 1011  : 初始化Redis连接池... : 
+2026/06/02-10:17:42.309758Z 139978934328192 INFO server.cpp main 1018  : Redis连接池初始化完成，连接数:  : 4 : 
+2026/06/02-10:17:42.310473Z 139978934328192 ERROR server.cpp Run 772  : 服务器初始化失败 : 

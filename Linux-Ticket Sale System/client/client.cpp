@@ -164,6 +164,11 @@ void TcpClient::User_Register()
     cout << "|            注册成功" << endl;
     cout << "+----------------------------------------+" << endl;
     login_status = true;
+    
+    // 等待用户按回车继续，避免立即进入下一个操作
+    cout << "|  按回车继续...";
+    cin.ignore();  // 忽略之前的换行符
+    cin.get();     // 等待用户输入
 }
 
 // 用户登录
@@ -206,6 +211,11 @@ void TcpClient::User_Login()
     cout << "|            登录成功" << endl;
     cout << "|        欢迎，" << username << endl;
     cout << "+----------------------------------------+" << endl;
+    
+    // 等待用户按回车继续，避免立即进入下一个操作
+    cout << "|  按回车继续...";
+    cin.ignore();  // 忽略之前的换行符
+    cin.get();     // 等待用户输入
 }
 
 // 显示菜单并获取用户选择

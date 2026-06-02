@@ -110,7 +110,7 @@ public:
 public:
     // 网络配置成员变量
     string listen_ip;      // 监听IP地址
-    short listen_port;     // 监听端口
+    short listen_port;     // 监听端口-+++++-+
     int listen_max;        // 最大监听队列长度
     
     // 线程池配置
@@ -320,7 +320,12 @@ private:
     int m_epoll_fd;                            // epoll的文件描述符
     struct epoll_event m_events[EPOLL_MAX_EVENTS]; // epoll事件数组
     int m_event_count;                         // 本次epoll_wait返回的事件数
+public:
     CachedThreadPool m_thread_pool;            // 线程池（处理业务逻辑）
 };
+
+// Redis分布式锁函数前向声明
+std::string Redis_Lock(const std::string &key, int timeout_ms);
+bool Redis_Unlock(const std::string &key, const std::string &lock_value);
 
 #endif // SERVER_H
